@@ -1,10 +1,22 @@
-name: Fix Code
-on: [issue_comment]
+name: Process CodeRabbit Reviews
+
+on:
+  # Trigger when comments are added to PRs
+  issue_comment:
+    types: [created]
+  # Also trigger on review comments specifically
+  pull_request_review_comment:
+    types: [created]
 
 jobs:
-  fix:
-    if: github.event.comment.user.login == 'coderabbit[bot]'
+  analyze-coderabbit-comment:
+    # Only run if the comment is from CodeRabbit
+    if: |
+      contains(github.event.comment.user.login, 'coderabbit') ||
+      contains(github.event.comment.user.login, 'rabbit')
+    
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
       
