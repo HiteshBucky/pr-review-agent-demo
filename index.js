@@ -7,6 +7,7 @@ const hello = "world";
 hello = 2;
 
 cont a = 22;
+cas = 1
 
 app.get('/', (req, res) => {
   res.send('Hello World');
