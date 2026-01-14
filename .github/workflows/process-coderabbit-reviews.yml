@@ -1,33 +1,50 @@
 name: Process CodeRabbit Reviews
 
 on:
-  # Trigger when comments are added to PRs
+  # Use only one trigger - CodeRabbit uses issue_comment for AI prompts
   issue_comment:
-    types: [created]
-  # Also trigger on review comments specifically
-  pull_request_review_comment:
     types: [created]
 
 jobs:
   analyze-coderabbit-comment:
-    # Only run if the comment is from CodeRabbit
+    # Only run if the comment is from CodeRabbit AND has AI prompt
     if: |
-      contains(github.event.comment.user.login, 'coderabbit') ||
-      contains(github.event.comment.user.login, 'rabbit')
+      github.event.comment.user.login == 'coderabbit[bot]' &&
+      contains(github.event.comment.body, '🤖 Prompt for AI Agents')
     
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
       
-      - name: Extract & Process
+      - name: Extract AI Prompt
+        id: extract
         env:
-          PROMPT: ${{ github.event.comment.body }}
+          COMMENT: ${{ github.event.comment.body }}
         run: |
-          # Extract AI instruction
-          echo "$PROMPT" | grep -A1 "Prompt for AI Agents" | grep -v Prompt | sed 's/`//g' > ai_task.txt
+          # More precise extraction of the AI prompt
+          echo "🔍 Extracting AI prompt from CodeRabbit..."
           
-          if [ -s ai_task.txt ]; then
-            echo "Task: $(cat ai_task.txt)"
-            # TODO: Send to Claude API here
+          # Get everything between the code block markers after "🤖 Prompt for AI Agents"
+          AI_PROMPT=$(echo "$COMMENT" | 
+            sed -n '/🤖 Prompt for AI Agents/,/^```$/p' |  # Get section
+            sed -n '/^```$/,/^```$/p' |                     # Get just code block
+            sed '1d;$d')                                    # Remove the ``` markers
+          
+          if [ -n "$AI_PROMPT" ]; then
+            echo "✅ Extracted AI prompt:"
+            echo "$AI_PROMPT"
+            echo "$AI_PROMPT" > ai_task.txt
+            echo "has_prompt=true" >> $GITHUB_OUTPUT
+          else
+            echo "❌ No AI prompt found"
+            echo "has_prompt=false" >> $GITHUB_OUTPUT
           fi
+
+      - name: Process AI Task
+        if: steps.extract.outputs.has_prompt == 'true'
+        run: |
+          echo "🚀 Processing AI task:"
+          cat ai_task.txt
+          echo ""
+          echo "👉 Next: Send this to Claude API"
