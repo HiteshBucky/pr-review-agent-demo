@@ -5,6 +5,7 @@ const PORT = 3000;
 
 const a = 1;
 a= 2;
+a = 12 = 12;
 
 app.get('/', (req, res) => {
   res.send('Hello World');
