@@ -1,90 +1,21 @@
-# .github/workflows/process-coderabbit-reviews.yml
-name: Process CodeRabbit Reviews
-
-on:
-  # Trigger when comments are added to PRs
-  issue_comment:
-    types: [created]
-  # Also trigger on review comments specifically
-  pull_request_review_comment:
-    types: [created]
+name: Fix Code
+on: [issue_comment]
 
 jobs:
-  analyze-coderabbit-comment:
-    # Only run if the comment is from CodeRabbit
-    if: |
-      contains(github.event.comment.user.login, 'coderabbit') ||
-      contains(github.event.comment.user.login, 'rabbit')
-    
+  fix:
+    if: github.event.comment.user.login == 'coderabbit[bot]'
     runs-on: ubuntu-latest
-    
     steps:
-      - name: Check for CodeRabbit comment
-        id: check_comment
+      - uses: actions/checkout@v4
+      
+      - name: Extract & Process
+        env:
+          PROMPT: ${{ github.event.comment.body }}
         run: |
-          COMMENT_BODY="${{ github.event.comment.body }}"
-          echo "Raw comment received:"
-          echo "$COMMENT_BODY"
-          echo ""
+          # Extract AI instruction
+          echo "$PROMPT" | grep -A1 "Prompt for AI Agents" | grep -v Prompt | sed 's/`//g' > ai_task.txt
           
-          # Check for problematic indicators in CodeRabbit's comment
-          PROBLEMATIC=false
-          
-          # CodeRabbit often uses these indicators for issues
-          if [[ "$COMMENT_BODY" =~ ⚠️|🔴|🟡|"Potential issue"|"Critical"|"Consider"|"suggest"|"improve"|"Could" ]]; then
-            echo "✅ Detected actionable comment from CodeRabbit"
-            PROBLEMATIC=true
-          else
-            echo "ℹ️  Comment doesn't contain actionable items"
+          if [ -s ai_task.txt ]; then
+            echo "Task: $(cat ai_task.txt)"
+            # TODO: Send to Claude API here
           fi
-          
-          # Check for severity patterns (CodeRabbit sometimes uses markdown like **Potential issue**)
-          if [[ "$COMMENT_BODY" =~ \*\*.*[Ii]ssue\*\*|\*\*.*[Cc]ritical\*\* ]]; then
-            echo "✅ Detected severity markers in comment"
-            PROBLEMATIC=true
-          fi
-          
-          if [ "$PROBLEMATIC" = true ]; then
-            echo "RUN_AGENT=true" >> $GITHUB_OUTPUT
-            echo "DETECTED_ISSUE=true" >> $GITHUB_OUTPUT
-          else
-            echo "RUN_AGENT=false" >> $GITHUB_OUTPUT
-            echo "DETECTED_ISSUE=false" >> $GITHUB_OUTPUT
-          fi
-          
-          # Also output a cleaned version of the comment
-          CLEANED_COMMENT=$(echo "$COMMENT_BODY" | tr '\n' ' ' | head -c 500)
-          echo "COMMENT_PREVIEW=\"$CLEANED_COMMENT...\"" >> $GITHUB_OUTPUT
-
-      - name: Log details for problematic comments
-        if: steps.check_comment.outputs.RUN_AGENT == 'true'
-        run: |
-          echo "🚨 CodeRabbit Actionable Comment Detected!"
-          echo "=========================================="
-          echo "PR: ${{ github.event.pull_request.html_url || github.event.issue.html_url }}"
-          echo "Comment by: ${{ github.event.comment.user.login }}"
-          echo "Preview: ${{ steps.check_comment.outputs.COMMENT_PREVIEW }}"
-          echo ""
-          echo "📊 Summary: This comment contains issues that would trigger the AI agent"
-          echo ""
-          echo "Next steps would be:"
-          echo "1. Extract the problematic code section"
-          echo "2. Send to AI agent for fixing"
-          echo "3. Create a fix branch and PR"
-
-      - name: Skip for non-problematic comments
-        if: steps.check_comment.outputs.RUN_AGENT == 'false'
-        run: |
-          echo "✅ No actionable issues detected"
-          echo "Comment appears to be informational only"
-          echo "AI agent will not be triggered"
-
-      # Add this step to help debugging
-      - name: Debug information
-        if: always()
-        run: |
-          echo "=== Debug Info ==="
-          echo "Event: ${{ github.event_name }}"
-          echo "Comment ID: ${{ github.event.comment.id }}"
-          echo "User: ${{ github.event.comment.user.login }}"
-          echo "Issue/PR Number: ${{ github.event.issue.number || github.event.pull_request.number }}"
