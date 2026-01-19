@@ -1,50 +1,282 @@
 name: Process CodeRabbit Reviews
 
 on:
-  # Use only one trigger - CodeRabbit uses issue_comment for AI prompts
+  # CodeRabbit can use either issue_comment (PR conversation) or review comments
   issue_comment:
     types: [created]
+  pull_request_review_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
 
 jobs:
-  analyze-coderabbit-comment:
-    # Only run if the comment is from CodeRabbit AND has AI prompt
+  process-coderabbit-review:
+    # Run if comment is from CodeRabbit AND contains AI prompt
+    # Note: CodeRabbit's bot username is 'coderabbitai[bot]'
     if: |
-      github.event.comment.user.login == 'coderabbit[bot]' &&
-      contains(github.event.comment.body, '🤖 Prompt for AI Agents')
-    
+      (github.event.comment.user.login == 'coderabbitai[bot]' ||
+       github.event.comment.user.login == 'coderabbit[bot]') &&
+      contains(github.event.comment.body, 'Prompt for AI Agents')
+
     runs-on: ubuntu-latest
 
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
     steps:
-      - uses: actions/checkout@v4
-      
-      - name: Extract AI Prompt
-        id: extract
-        env:
-          COMMENT: ${{ github.event.comment.body }}
+      # ============================================
+      # PHASE 1: Extract CodeRabbit AI Prompt
+      # ============================================
+      - name: Get PR Information
+        id: pr_info
         run: |
-          # More precise extraction of the AI prompt
-          echo "🔍 Extracting AI prompt from CodeRabbit..."
-          
-          # Get everything between the code block markers after "🤖 Prompt for AI Agents"
-          AI_PROMPT=$(echo "$COMMENT" | 
-            sed -n '/🤖 Prompt for AI Agents/,/^```$/p' |  # Get section
-            sed -n '/^```$/,/^```$/p' |                     # Get just code block
-            sed '1d;$d')                                    # Remove the ``` markers
-          
-          if [ -n "$AI_PROMPT" ]; then
-            echo "✅ Extracted AI prompt:"
-            echo "$AI_PROMPT"
-            echo "$AI_PROMPT" > ai_task.txt
-            echo "has_prompt=true" >> $GITHUB_OUTPUT
+          # For issue_comment, we need to get PR details from the issue
+          if [ "${{ github.event_name }}" == "issue_comment" ]; then
+            PR_NUMBER="${{ github.event.issue.number }}"
           else
-            echo "❌ No AI prompt found"
-            echo "has_prompt=false" >> $GITHUB_OUTPUT
+            PR_NUMBER="${{ github.event.pull_request.number }}"
           fi
 
-      - name: Process AI Task
+          echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
+
+          # Get PR details using GitHub API
+          PR_DATA=$(gh api repos/${{ github.repository }}/pulls/$PR_NUMBER)
+          HEAD_REF=$(echo "$PR_DATA" | jq -r '.head.ref')
+          HEAD_SHA=$(echo "$PR_DATA" | jq -r '.head.sha')
+          BASE_REF=$(echo "$PR_DATA" | jq -r '.base.ref')
+
+          echo "head_ref=$HEAD_REF" >> $GITHUB_OUTPUT
+          echo "head_sha=$HEAD_SHA" >> $GITHUB_OUTPUT
+          echo "base_ref=$BASE_REF" >> $GITHUB_OUTPUT
+
+          echo "📋 PR #$PR_NUMBER"
+          echo "🌿 Feature Branch: $HEAD_REF"
+          echo "🎯 Base Branch: $BASE_REF"
+
+      - name: Checkout Feature Branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.pr_info.outputs.head_ref }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract AI Prompt from CodeRabbit Comment
+        id: extract
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          echo "🔍 Extracting AI prompt from CodeRabbit review..."
+
+          # Save comment to file for processing
+          echo "$COMMENT_BODY" > /tmp/comment.txt
+
+          # Extract the AI prompt section
+          # CodeRabbit formats it as: 🤖 Prompt for AI Agents followed by code block
+          AI_PROMPT=$(cat /tmp/comment.txt | \
+            awk '/Prompt for AI Agents/,/```$/' | \
+            sed -n '/```/,/```/p' | \
+            sed '1d;$d')
+
+          # If first method fails, try alternative extraction
+          if [ -z "$AI_PROMPT" ]; then
+            AI_PROMPT=$(cat /tmp/comment.txt | \
+              grep -A 1000 "Prompt for AI Agents" | \
+              sed -n '/```/,/```/p' | head -50 | \
+              sed '1d;$d')
+          fi
+
+          # Store the full comment as context too
+          FULL_REVIEW=$(cat /tmp/comment.txt)
+
+          if [ -n "$AI_PROMPT" ]; then
+            echo "✅ Successfully extracted AI prompt"
+            echo "$AI_PROMPT" > /tmp/ai_prompt.txt
+            echo "$FULL_REVIEW" > /tmp/full_review.txt
+            echo "has_prompt=true" >> $GITHUB_OUTPUT
+
+            # Store multiline output
+            {
+              echo 'ai_prompt<<EOF'
+              echo "$AI_PROMPT"
+              echo 'EOF'
+            } >> $GITHUB_OUTPUT
+          else
+            echo "⚠️ Could not extract AI prompt, using full comment as context"
+            echo "$FULL_REVIEW" > /tmp/ai_prompt.txt
+            echo "has_prompt=true" >> $GITHUB_OUTPUT
+            {
+              echo 'ai_prompt<<EOF'
+              echo "$FULL_REVIEW"
+              echo 'EOF'
+            } >> $GITHUB_OUTPUT
+          fi
+
+          echo "📝 Prompt content:"
+          cat /tmp/ai_prompt.txt
+
+      # ============================================
+      # PHASE 2: Process with AI Agent (Claude)
+      # ============================================
+      - name: Setup Node.js
+        if: steps.extract.outputs.has_prompt == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Claude Code CLI
         if: steps.extract.outputs.has_prompt == 'true'
         run: |
-          echo "🚀 Processing AI task:"
-          cat ai_task.txt
-          echo ""
-          echo "👉 Next: Send this to Claude API"
+          npm install -g @anthropic-ai/claude-code
+
+      - name: Process with Claude Agent
+        if: steps.extract.outputs.has_prompt == 'true'
+        id: claude
+        run: |
+          echo "🤖 Processing review with Claude..."
+
+          # Read the AI prompt
+          AI_PROMPT=$(cat /tmp/ai_prompt.txt)
+
+          # Create a comprehensive prompt for Claude
+          cat > /tmp/claude_task.txt << 'TASK_EOF'
+          You are reviewing code based on CodeRabbit's suggestions.
+
+          CodeRabbit Review/Suggestion:
+          ---
+          TASK_EOF
+
+          cat /tmp/ai_prompt.txt >> /tmp/claude_task.txt
+
+          cat >> /tmp/claude_task.txt << 'TASK_EOF'
+          ---
+
+          Please analyze the codebase and implement the suggested fixes.
+          Focus only on the specific issues mentioned. Do not make unrelated changes.
+          After making changes, provide a brief summary of what was fixed.
+          TASK_EOF
+
+          echo "📋 Task for Claude:"
+          cat /tmp/claude_task.txt
+
+          # Run Claude Code to process the task
+          # Using --print for non-interactive mode, --yes to auto-approve
+          claude --print --dangerously-skip-permissions "$(cat /tmp/claude_task.txt)" 2>&1 | tee /tmp/claude_output.txt || true
+
+          # Check if any files were modified
+          if git diff --quiet; then
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "⚠️ No changes were made by Claude"
+          else
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            echo "✅ Claude made changes to the codebase"
+            git diff --stat
+          fi
+
+      # ============================================
+      # PHASE 3: Create PR with Fixes
+      # ============================================
+      - name: Create Fix Branch and PR
+        if: steps.claude.outputs.has_changes == 'true'
+        env:
+          PR_NUMBER: ${{ steps.pr_info.outputs.pr_number }}
+          FEATURE_BRANCH: ${{ steps.pr_info.outputs.head_ref }}
+        run: |
+          echo "🔧 Creating fix branch and PR..."
+
+          # Configure git
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Create a unique branch name for the fix
+          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+          FIX_BRANCH="ai-fix/${FEATURE_BRANCH}-${TIMESTAMP}"
+
+          echo "📌 Creating branch: $FIX_BRANCH"
+          git checkout -b "$FIX_BRANCH"
+
+          # Stage and commit all changes
+          git add -A
+          git commit -m "fix: Apply CodeRabbit review suggestions
+
+          Automated fixes based on CodeRabbit AI review.
+          Original PR: #$PR_NUMBER
+
+          Co-authored-by: Claude <noreply@anthropic.com>"
+
+          # Push the fix branch
+          git push origin "$FIX_BRANCH"
+
+          # Create PR against the feature branch (not main)
+          PR_BODY=$(cat << EOF
+          ## 🤖 Automated Fix PR
+
+          This PR contains automated fixes based on [CodeRabbit's review](https://github.com/${{ github.repository }}/pull/${PR_NUMBER}#issuecomment-${{ github.event.comment.id }}) suggestions.
+
+          ### Changes Made
+          $(git diff HEAD~1 --stat)
+
+          ### Original Review
+          <details>
+          <summary>Click to expand CodeRabbit's suggestions</summary>
+
+          $(cat /tmp/ai_prompt.txt)
+
+          </details>
+
+          ---
+
+          **Target Branch:** \`$FEATURE_BRANCH\`
+          **Original PR:** #$PR_NUMBER
+
+          > Please review these changes and merge if they look correct.
+          EOF
+          )
+
+          # Create the PR targeting the feature branch
+          gh pr create \
+            --title "fix: CodeRabbit review fixes for #$PR_NUMBER" \
+            --body "$PR_BODY" \
+            --base "$FEATURE_BRANCH" \
+            --head "$FIX_BRANCH"
+
+          echo "✅ Fix PR created successfully!"
+
+      - name: Comment on Original PR
+        if: steps.claude.outputs.has_changes == 'true'
+        env:
+          PR_NUMBER: ${{ steps.pr_info.outputs.pr_number }}
+        run: |
+          # Get the newly created PR URL
+          FIX_PR_URL=$(gh pr list --head "ai-fix/" --json url -q '.[0].url' || echo "")
+
+          COMMENT="🤖 **AI Fix Generated**
+
+          I've analyzed the CodeRabbit review and created a fix PR with the suggested changes.
+
+          👉 **Fix PR:** $FIX_PR_URL
+
+          Please review the changes and merge if they look correct."
+
+          gh pr comment "$PR_NUMBER" --body "$COMMENT"
+
+      - name: No Changes Summary
+        if: steps.extract.outputs.has_prompt == 'true' && steps.claude.outputs.has_changes != 'true'
+        env:
+          PR_NUMBER: ${{ steps.pr_info.outputs.pr_number }}
+        run: |
+          echo "ℹ️ No automated changes were made"
+
+          COMMENT="🤖 **AI Review Analysis**
+
+          I analyzed the CodeRabbit review but couldn't automatically apply fixes. This might be because:
+          - The suggestions require manual review
+          - The changes are architectural in nature
+          - The code context wasn't sufficient
+
+          Please review the suggestions manually."
+
+          gh pr comment "$PR_NUMBER" --body "$COMMENT"
