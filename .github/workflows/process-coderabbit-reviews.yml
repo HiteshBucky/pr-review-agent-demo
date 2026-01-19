@@ -138,12 +138,9 @@ jobs:
         run: |
           echo "🤖 Processing review with Claude..."
 
-          # Read the AI prompt
-          AI_PROMPT=$(cat /tmp/ai_prompt.txt)
-
           # Create a comprehensive prompt for Claude
           cat > /tmp/claude_task.txt << 'TASK_EOF'
-          You are reviewing code based on CodeRabbit's suggestions.
+          You are an AI code assistant. Your task is to fix code issues based on a code review.
 
           CodeRabbit Review/Suggestion:
           ---
@@ -152,28 +149,44 @@ jobs:
           cat /tmp/ai_prompt.txt >> /tmp/claude_task.txt
 
           cat >> /tmp/claude_task.txt << 'TASK_EOF'
+
           ---
 
-          Please analyze the codebase and implement the suggested fixes.
-          Focus only on the specific issues mentioned. Do not make unrelated changes.
-          After making changes, provide a brief summary of what was fixed.
+          IMPORTANT INSTRUCTIONS:
+          1. Read the file(s) mentioned in the review
+          2. Understand the issue described
+          3. Make the MINIMAL fix to address the issue
+          4. Do NOT add comments, documentation, or make unrelated changes
+          5. If the code is dead/unused, remove it entirely
+
+          Apply the fix now.
           TASK_EOF
 
           echo "📋 Task for Claude:"
           cat /tmp/claude_task.txt
 
-          # Run Claude Code to process the task
-          # Using --print for non-interactive mode, --yes to auto-approve
-          claude --print --dangerously-skip-permissions "$(cat /tmp/claude_task.txt)" 2>&1 | tee /tmp/claude_output.txt || true
+          # Run Claude Code in agentic mode (NOT --print mode which is read-only)
+          # --dangerously-skip-permissions: auto-approve all tool calls for CI
+          # NOTE: -p/--print is READ-ONLY mode, we must NOT use it
+          # The prompt is passed as a positional argument
+          echo "🚀 Running Claude Code agent..."
+          claude --dangerously-skip-permissions "$(cat /tmp/claude_task.txt)" 2>&1 | tee /tmp/claude_output.txt || true
+
+          echo ""
+          echo "📄 Claude output:"
+          cat /tmp/claude_output.txt
 
           # Check if any files were modified
-          if git diff --quiet; then
+          if git diff --quiet && git diff --cached --quiet; then
             echo "has_changes=false" >> $GITHUB_OUTPUT
             echo "⚠️ No changes were made by Claude"
+            echo "Debug: Checking working directory status..."
+            git status
           else
             echo "has_changes=true" >> $GITHUB_OUTPUT
             echo "✅ Claude made changes to the codebase"
             git diff --stat
+            git diff
           fi
 
       # ============================================
