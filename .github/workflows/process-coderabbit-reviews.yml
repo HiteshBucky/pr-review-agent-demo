@@ -1,10 +1,8 @@
 name: Process CodeRabbit Reviews
 
 on:
-  # CodeRabbit can use either issue_comment (PR conversation) or review comments
+  # Only trigger on the main summary comment, not individual inline comments
   issue_comment:
-    types: [created]
-  pull_request_review_comment:
     types: [created]
 
 permissions:
@@ -12,14 +10,20 @@ permissions:
   pull-requests: write
   issues: write
 
+# Only one workflow run per PR at a time
+concurrency:
+  group: coderabbit-fix-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
 jobs:
   process-coderabbit-review:
-    # Run if comment is from CodeRabbit AND contains AI prompt
-    # Note: CodeRabbit's bot username is 'coderabbitai[bot]'
+    # Run only on the MAIN SUMMARY comment from CodeRabbit
+    # This comment contains "Actionable comments posted: N"
+    # Ignore individual inline review comments to avoid multiple PRs
     if: |
       (github.event.comment.user.login == 'coderabbitai[bot]' ||
        github.event.comment.user.login == 'coderabbit[bot]') &&
-      contains(github.event.comment.body, 'Prompt for AI Agents')
+      contains(github.event.comment.body, 'Actionable comments posted:')
 
     runs-on: ubuntu-latest
 
@@ -64,58 +68,68 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract AI Prompt from CodeRabbit Comment
+      - name: Fetch All CodeRabbit Review Comments
         id: extract
         env:
-          COMMENT_BODY: ${{ github.event.comment.body }}
+          PR_NUMBER: ${{ steps.pr_info.outputs.pr_number }}
         run: |
-          echo "🔍 Extracting AI prompt from CodeRabbit review..."
+          echo "🔍 Fetching all CodeRabbit review comments..."
 
-          # Save comment to file for processing
-          echo "$COMMENT_BODY" > /tmp/comment.txt
+          # Fetch all review comments on this PR
+          gh api repos/${{ github.repository }}/pulls/${PR_NUMBER}/comments \
+            --paginate \
+            --jq '.[] | select(.user.login == "coderabbitai[bot]" or .user.login == "coderabbit[bot]")' \
+            > /tmp/all_comments.json
 
-          # Extract the AI prompt section
-          # CodeRabbit formats it as: 🤖 Prompt for AI Agents followed by code block
-          AI_PROMPT=$(cat /tmp/comment.txt | \
-            awk '/Prompt for AI Agents/,/```$/' | \
-            sed -n '/```/,/```/p' | \
-            sed '1d;$d')
+          # Count comments
+          COMMENT_COUNT=$(cat /tmp/all_comments.json | jq -s 'length')
+          echo "📊 Found $COMMENT_COUNT CodeRabbit review comments"
 
-          # If first method fails, try alternative extraction
-          if [ -z "$AI_PROMPT" ]; then
-            AI_PROMPT=$(cat /tmp/comment.txt | \
-              grep -A 1000 "Prompt for AI Agents" | \
-              sed -n '/```/,/```/p' | head -50 | \
+          if [ "$COMMENT_COUNT" -eq "0" ]; then
+            echo "⚠️ No CodeRabbit review comments found"
+            echo "has_prompt=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Extract all AI prompts from the comments
+          echo "# CodeRabbit Review Issues" > /tmp/ai_prompt.txt
+          echo "" >> /tmp/ai_prompt.txt
+
+          ISSUE_NUM=1
+          cat /tmp/all_comments.json | jq -rs '.[] | .body' | while IFS= read -r COMMENT_BODY; do
+            # Extract file path and line info if available
+            FILE_PATH=$(echo "$COMMENT_BODY" | grep -oP '(?<=`)[^`]+\.(js|ts|py|go|java|rb|rs|cpp|c|h)[^`]*(?=`)' | head -1 || echo "")
+
+            # Extract the AI prompt section
+            AI_PROMPT=$(echo "$COMMENT_BODY" | \
+              awk '/Prompt for AI Agents/,/```$/' | \
+              sed -n '/```/,/```/p' | \
               sed '1d;$d')
+
+            if [ -n "$AI_PROMPT" ]; then
+              echo "## Issue $ISSUE_NUM" >> /tmp/ai_prompt.txt
+              if [ -n "$FILE_PATH" ]; then
+                echo "File: $FILE_PATH" >> /tmp/ai_prompt.txt
+              fi
+              echo "" >> /tmp/ai_prompt.txt
+              echo "$AI_PROMPT" >> /tmp/ai_prompt.txt
+              echo "" >> /tmp/ai_prompt.txt
+              echo "---" >> /tmp/ai_prompt.txt
+              echo "" >> /tmp/ai_prompt.txt
+              ISSUE_NUM=$((ISSUE_NUM + 1))
+            fi
+          done
+
+          # Check if we got any prompts
+          if [ ! -s /tmp/ai_prompt.txt ] || [ "$(wc -l < /tmp/ai_prompt.txt)" -lt 3 ]; then
+            echo "⚠️ Could not extract AI prompts, using full comments as context"
+            cat /tmp/all_comments.json | jq -rs '.[] | "## Comment\n\(.body)\n\n---\n"' > /tmp/ai_prompt.txt
           fi
 
-          # Store the full comment as context too
-          FULL_REVIEW=$(cat /tmp/comment.txt)
-
-          if [ -n "$AI_PROMPT" ]; then
-            echo "✅ Successfully extracted AI prompt"
-            echo "$AI_PROMPT" > /tmp/ai_prompt.txt
-            echo "$FULL_REVIEW" > /tmp/full_review.txt
-            echo "has_prompt=true" >> $GITHUB_OUTPUT
-
-            # Store multiline output
-            {
-              echo 'ai_prompt<<EOF'
-              echo "$AI_PROMPT"
-              echo 'EOF'
-            } >> $GITHUB_OUTPUT
-          else
-            echo "⚠️ Could not extract AI prompt, using full comment as context"
-            echo "$FULL_REVIEW" > /tmp/ai_prompt.txt
-            echo "has_prompt=true" >> $GITHUB_OUTPUT
-            {
-              echo 'ai_prompt<<EOF'
-              echo "$FULL_REVIEW"
-              echo 'EOF'
-            } >> $GITHUB_OUTPUT
-          fi
-
-          echo "📝 Prompt content:"
+          echo "has_prompt=true" >> $GITHUB_OUTPUT
+          echo "✅ Successfully extracted all AI prompts"
+          echo ""
+          echo "📝 Combined prompt content:"
           cat /tmp/ai_prompt.txt
 
       # ============================================
@@ -140,26 +154,27 @@ jobs:
 
           # Create a comprehensive prompt for Claude
           cat > /tmp/claude_task.txt << 'TASK_EOF'
-          You are an AI code assistant. Your task is to fix code issues based on a code review.
+          You are an AI code assistant. Your task is to fix ALL code issues based on a code review.
+          There are MULTIPLE issues to fix - make sure you address ALL of them.
 
-          CodeRabbit Review/Suggestion:
-          ---
+          CodeRabbit Review Issues:
+          ========================
           TASK_EOF
 
           cat /tmp/ai_prompt.txt >> /tmp/claude_task.txt
 
           cat >> /tmp/claude_task.txt << 'TASK_EOF'
 
-          ---
+          ========================
 
           IMPORTANT INSTRUCTIONS:
-          1. Read the file(s) mentioned in the review
-          2. Understand the issue described
-          3. Make the MINIMAL fix to address the issue
+          1. Read ALL the file(s) mentioned in the reviews
+          2. Fix ALL issues described above - there may be multiple issues
+          3. Make the MINIMAL fix to address each issue
           4. Do NOT add comments, documentation, or make unrelated changes
-          5. If the code is dead/unused, remove it entirely
+          5. If code is dead/unused, remove it entirely
 
-          Apply the fix now.
+          Apply ALL fixes now.
           TASK_EOF
 
           echo "📋 Task for Claude:"
