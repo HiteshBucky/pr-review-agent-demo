@@ -2,7 +2,8 @@ const express = require('express');
 
 const app = express();
 
-const PORT = Number(process.env.PORT) || '3000';
+const parsed = Number(process.env.PORT);
+const PORT = Number.isNaN(parsed) ? 3000 : parsed;
 
 app.get('/', async (req, res) => {
 
