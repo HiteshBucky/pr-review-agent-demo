@@ -1,9 +1,10 @@
 name: Process CodeRabbit Reviews
 
 on:
-  # Only trigger on the main summary comment, not individual inline comments
-  issue_comment:
-    types: [created]
+  # Trigger on PR review (not review comments) - this is where CodeRabbit posts
+  # its main summary with "Actionable comments posted: N"
+  pull_request_review:
+    types: [submitted]
 
 permissions:
   contents: write
@@ -12,18 +13,17 @@ permissions:
 
 # Only one workflow run per PR at a time
 concurrency:
-  group: coderabbit-fix-${{ github.event.issue.number }}
+  group: coderabbit-fix-${{ github.event.pull_request.number }}
   cancel-in-progress: false
 
 jobs:
   process-coderabbit-review:
-    # Run only on the MAIN SUMMARY comment from CodeRabbit
-    # This comment contains "Actionable comments posted: N"
-    # Ignore individual inline review comments to avoid multiple PRs
+    # Run only on the MAIN REVIEW from CodeRabbit
+    # This review contains "Actionable comments posted: N"
     if: |
-      (github.event.comment.user.login == 'coderabbitai[bot]' ||
-       github.event.comment.user.login == 'coderabbit[bot]') &&
-      contains(github.event.comment.body, 'Actionable comments posted:')
+      (github.event.review.user.login == 'coderabbitai[bot]' ||
+       github.event.review.user.login == 'coderabbit[bot]') &&
+      contains(github.event.review.body, 'Actionable comments posted:')
 
     runs-on: ubuntu-latest
 
@@ -38,21 +38,13 @@ jobs:
       - name: Get PR Information
         id: pr_info
         run: |
-          # For issue_comment, we need to get PR details from the issue
-          if [ "${{ github.event_name }}" == "issue_comment" ]; then
-            PR_NUMBER="${{ github.event.issue.number }}"
-          else
-            PR_NUMBER="${{ github.event.pull_request.number }}"
-          fi
+          # For pull_request_review, PR info is directly available
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          HEAD_REF="${{ github.event.pull_request.head.ref }}"
+          HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+          BASE_REF="${{ github.event.pull_request.base.ref }}"
 
           echo "pr_number=$PR_NUMBER" >> $GITHUB_OUTPUT
-
-          # Get PR details using GitHub API
-          PR_DATA=$(gh api repos/${{ github.repository }}/pulls/$PR_NUMBER)
-          HEAD_REF=$(echo "$PR_DATA" | jq -r '.head.ref')
-          HEAD_SHA=$(echo "$PR_DATA" | jq -r '.head.sha')
-          BASE_REF=$(echo "$PR_DATA" | jq -r '.base.ref')
-
           echo "head_ref=$HEAD_REF" >> $GITHUB_OUTPUT
           echo "head_sha=$HEAD_SHA" >> $GITHUB_OUTPUT
           echo "base_ref=$BASE_REF" >> $GITHUB_OUTPUT
@@ -242,7 +234,7 @@ jobs:
           PR_BODY=$(cat << EOF
           ## 🤖 Automated Fix PR
 
-          This PR contains automated fixes based on [CodeRabbit's review](https://github.com/${{ github.repository }}/pull/${PR_NUMBER}#issuecomment-${{ github.event.comment.id }}) suggestions.
+          This PR contains automated fixes based on [CodeRabbit's review](https://github.com/${{ github.repository }}/pull/${PR_NUMBER}) suggestions.
 
           ### Changes Made
           $(git diff HEAD~1 --stat)
