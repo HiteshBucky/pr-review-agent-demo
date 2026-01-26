@@ -19,7 +19,7 @@ const getUser = () => {
 };
 
 app.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${port}`);
+  console.log(`Server running on http://localhost:${PORT}`);
 });
 
 Promise.reject('Unexpected rejection');
