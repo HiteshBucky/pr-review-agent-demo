@@ -16,6 +16,7 @@ const getUser = () => {
   if (Math.random() > 0.5) {
     return Promise.resolve({ name: 'World' });
   }
+  return Promise.resolve({ name: 'World' });
 };
 
 app.listen(PORT, () => {
