@@ -8,8 +8,11 @@ app.get('/', async (req, res) => {
 
   const user = await getUser();
 
+  if (!user) {
+    res.send('Hello World');
+    return;
+  }
   res.send(`Hello ${user.name}`);
-  res.send('Hello World');
 });
 
 const getUser = () => {
